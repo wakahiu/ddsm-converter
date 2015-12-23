@@ -4,8 +4,142 @@
 # converts it to a PNG image. See the help message for full details.
 
 require 'net/ftp'
-require 'net/scp'
+require 'optparse'
+require 'ostruct'
+require 'optparse/time'
+require 'pp'
+require 'logger'
 
+$log = Logger.new(STDOUT)
+$log.level = Logger::DEBUG
+
+class Optparse
+
+  CODES = %w[iso-2022-jp shift_jis euc-jp utf8 binary]
+  CODE_ALIASES = { "jis" => "iso-2022-jp", "sjis" => "shift_jis" }
+
+  #
+  # Return a structure describing the options.
+  #
+  def self.parse(args)
+    # The options specified on the command line will be collected in *options*.
+    # We set default values here.
+    options = OpenStruct.new
+	options.data = "."
+	options.verbose = false
+	options.all = false
+	options.file = nil
+	
+    options.inplace = false
+	options.save = "."
+    options.encoding = "utf8"
+    options.transfer_type = :auto
+    
+
+    opt_parser = OptionParser.new do |opts|
+      opts.banner = "Usage: example.rb [options]"
+
+      opts.separator ""
+      opts.separator "Specific options:"
+	  
+	  # Mandatory argument.
+      opts.on("-d", "--data [DATA PATH]",
+              "The path containing the /DDSM directory") do |data|
+        options.data = data
+      end
+	  
+	  # Boolean switch.
+      opts.on("-a", "--all [ALL]", "Convert all files") do |a|
+        options.all = a
+      end
+	  
+	  opts.on("-s", "--save [SAVE PATH]",
+              "The path containing the results of the convertion") do |save|
+        options.save = save
+      end
+	  
+	  # Boolean switch.
+      opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
+        options.verbose = v
+      end
+	  
+	  opts.on("-f", "--file [FIlE NAME]",
+              "The filename to be converted into PNG",
+			  "For example: A_1141_1.LEFT_MLO",
+			  "Overrides --all") do |file|
+        options.file = file
+		options.all = false
+      end
+
+      # Optional argument; multi-line description.
+      opts.on("-i", "--inplace [EXTENSION]",
+              "Edit ARGV files in place",
+              "  (make backup if EXTENSION supplied)") do |ext|
+        options.inplace = true
+        options.extension = ext || ''
+        options.extension.sub!(/\A\.?(?=.)/, ".")  # Ensure extension begins with dot.
+      end
+
+      # Cast 'delay' argument to a Float.
+      opts.on("--delay N", Float, "Delay N seconds before executing") do |n|
+        options.delay = n
+      end
+
+      # Cast 'time' argument to a Time object.
+      opts.on("-t", "--time [TIME]", Time, "Begin execution at given time") do |time|
+        options.time = time
+      end
+
+      # Cast to octal integer.
+      opts.on("-F", "--irs [OCTAL]", OptionParser::OctalInteger,
+              "Specify record separator (default \\0)") do |rs|
+        options.record_separator = rs
+      end
+
+      # List of arguments.
+      opts.on("--list x,y,z", Array, "Example 'list' of arguments") do |list|
+        options.list = list
+      end
+
+      # Keyword completion.  We are specifying a specific set of arguments (CODES
+      # and CODE_ALIASES - notice the latter is a Hash), and the user may provide
+      # the shortest unambiguous text.
+      code_list = (CODE_ALIASES.keys + CODES).join(',')
+      opts.on("--code CODE", CODES, CODE_ALIASES, "Select encoding",
+              "  (#{code_list})") do |encoding|
+        options.encoding = encoding
+      end
+
+      # Optional argument with keyword completion.
+      opts.on("--type [TYPE]", [:text, :binary, :auto],
+              "Select transfer type (text, binary, auto)") do |t|
+        options.transfer_type = t
+      end
+
+      
+
+      opts.separator ""
+      opts.separator "Common options:"
+
+      # No argument, shows at tail.  This will print an options summary.
+      # Try it and see!
+      opts.on_tail("-h", "--help", "Show this message") do
+        puts opts
+        exit
+      end
+
+      # Another typical switch to print the version.
+      opts.on_tail("--version", "Show version") do
+        puts ::Version.join('.')
+        exit
+      end
+    end
+
+    opt_parser.parse!(args)
+    options
+  end  # parse()
+
+end  # class Optparse
 
 # Specify the name of the info-file.
 def info_file_name
@@ -17,10 +151,9 @@ end
 # /pub/DDSM/cases/cancers/cancer_06/case1141/A-1141-1.ics) and return the
 # local path to the file, or return nil if the file could not be dowloaded.
 def get_file_via_ftp(ddsm_path)
-	
-  ftp = Net::FTP.new('ec2-52-91-2-166.compute-1.amazonaws.coms')
-  ftp.passive = true
+  ftp = Net::FTP.new('figment.csee.usf.edu')
   ftp.login
+  ftp.passive = true
   ftp.getbinaryfile(ddsm_path)
     # Will be stored local to this program, under the same file name
     
@@ -79,10 +212,9 @@ def check_inputs(input)
 
 end
 
-# Given the name of a DDSM image, return the path to the
-# .ics file associated with the image name. If we can't find the 
-# path, then we return nil.
-def get_ics_path_for_image(image_name)
+# Given the name of a DDSM image, return the name to the
+# .ics file associated with the image name.
+def get_ics_name_for_image(image_name)
 
   # Does image_name look right?
   if image_name[/._\d{4,4}_.\..+/].nil?
@@ -95,7 +227,14 @@ def get_ics_path_for_image(image_name)
   image_name[1] = '-'
   image_name[6] = '-' # Change the '_'s to '-'s (better regexp-based approach?).
   image_name+='.ics' # Add the file suffix
+  
+  return image_name
+end
 
+# Given the name of a DDSM image, return the name to the remote
+# .ics file associated with the image name. If we can't find the 
+# path, then we return nil.
+def get_ics_file_ftp_path(image_name)
   # Get the path to the .ics file for the specified image.
   File.open(info_file_name) do |file|
     file.each_line do |line|
@@ -169,21 +308,30 @@ end
 # Given the name of a DDSM image, return a string that describes
 # the image dimensions and the name of the digitizer that was used to
 # capture it. If 
-def do_get_image_info(image_name)
+def do_get_image_info(base_dir, image_name)
   # Get the path to the ics file for image_name.
-  ftp_path = get_ics_path_for_image(image_name)
-  ftp_path.chomp!
-  puts "Fetching ICS file: " + ftp_path
+  ics_file_name = get_ics_name_for_image(image_name)
+  ics_file_name.chomp!
+  
+  ics_file = File.join(base_dir, ics_file_name)
+  $log.info("Reading ICS file: " + ics_file)
+  # Check if the file does not exist in the base directory,
+  # Fetch it via FTP
+  if !FileTest.exists?(ics_file)
+	$log.warn("ICS file DNE: in directory " + base_dir + ". Trying to fetch via FTP: " + ics_file_name)
+	ftp_path = get_ics_file_ftp_path(ics_file_name)
+	# Get the ics file; providing us with a string representing
+	# the local location of the file.
+	ics_file = get_file_via_ftp(ftp_path)
+  end
 
-  # Get the ics file; providing us with a string representing
-  # the local location of the file.
-  ics_file = get_file_via_ftp(ftp_path)
+  
 
   # Get the image dimensions and digitizer for image_name.
   image_dims_and_digitizer = get_image_dims_and_digitizer(image_name, ics_file)
 
   # Remove the .ics file as we don't need it any more.
-  File.delete(ics_file)
+  # File.delete(ics_file)
 
   return image_dims_and_digitizer
 end
@@ -192,18 +340,22 @@ end
 
 # Given a mammogram name and the path to the image info file, get the
 # image dimensions and digitizer name string.
-def get_image_info(image_name)
-  # Get the image dimensions and digitizer type for the specified
-  # image as a string.
-  image_info = do_get_image_info(image_name)
-  
-  # Now output the result to standard output.
-  all_ok = !image_info[:image_dims].nil? && !image_info[:digitizer].nil? # Is everything OK?
-  if all_ok
-    ret_val = image_info[:image_dims] + ' ' + image_info[:digitizer]
-  end
+def get_image_info(base_dir, intermediate_dir, image_name)
+	# Get the image dimensions and digitizer type for the specified
+	# image as a string.
+	image_info = do_get_image_info(base_dir, image_name)
 
-  return ret_val
+	# Now output the result to standard output.
+	all_ok = !image_info[:image_dims].nil? && !image_info[:digitizer].nil? # Is everything OK?
+	if all_ok
+		ret_val = image_info[:image_dims] + ' ' + image_info[:digitizer]
+		$log.debug("Succefully read ICS file " + image_name + " : " + ret_val)
+	else
+		log.fatal("Could not fetch ICS for file: " + image_name)
+		exit(-1)
+	end
+
+	return ret_val
 end
 
 # Return a non-existant random filename.
@@ -279,21 +431,33 @@ end
 
 # The entry point of the program.
 def main
-  # Check to see if the input is sensible.
-  check_inputs(ARGV)
-  
-  base_dir = ARGV[0]
-  puts 'Getting files from base directory' + base_dir
-  
-  image_name = ARGV[0]
-  
-  # Get the image dimensions and digitizer name string for the
-  # specified image.
-  image_info = get_image_info(image_name)
 
-  # Get the LJPEG file from the mirror of the FTP site, returning the
-  # path to the local file.
-  ljpeg_file = get_ljpeg(image_name)
+	# Parse the inputs
+	options = Optparse.parse(ARGV)
+	$log.info("Staring program")
+	
+	if options.verbose
+		$log.info("OPTIONS:")
+		$log.info(options)
+	end
+	
+	$log.info('Looking for files files from base directory: ' + options.data)
+  
+	if options.all == true
+		image_info = get_image_info(image_name)
+	elsif options.file != nil
+		# Get the image dimensions and digitizer name string for the
+		# specified image.
+		image_info = get_image_info(options.data, '', options.file)
+		# Get the LJPEG file, returning the path to the local file.
+		ljpeg_file = get_ljpeg(options.file)
+	elsif options.list != nil
+		image_info = get_image_info(image_name)
+	else
+		exit(-1)
+	end
+
+  
   
   exit(1)
   
