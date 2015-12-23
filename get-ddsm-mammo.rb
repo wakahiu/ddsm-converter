@@ -340,7 +340,7 @@ end
 
 # Given a mammogram name and the path to the image info file, get the
 # image dimensions and digitizer name string.
-def get_image_info(base_dir, intermediate_dir, image_name)
+def get_image_info(base_dir, image_name)
 	# Get the image dimensions and digitizer type for the specified
 	# image as a string.
 	image_info = do_get_image_info(base_dir, image_name)
@@ -371,22 +371,31 @@ end
 # Retrieve the LJPEG file for the mammogram with the specified
 # image_name, given the path to the info file. Return the path to the
 # local file if successful. If we can't get the file, then return nil.
-def get_ljpeg(image_name)
-  # Get the path to the image file on the mirror of the FTP server.
-  path = nil
-  File.open(info_file_name) do |file|
-    file.each_line do |line|
-      if !line[/.+#{image_name}\.LJPEG/].nil?
-        # We've found it, so get the file.
-        line.chomp!
-        local_path = get_file_via_ftp(line)
-        return local_path
-      end
-    end
-  end
+def get_ljpeg(base_dir, image_name)
 
-  # If we get here we didn't find where the file is on the server.
-  return nil
+	file_path = File.join(base_dir, image_name)
+	$log.info("Checking if LJPEG file exists: " + file_path)
+	if FileTest.exist?(file_path)
+		return file_path
+	else
+		# Get the path to the image file on the mirror of the FTP server.
+		path = nil
+		File.open(info_file_name) do |file|
+			file.each_line do |line|
+			if !line[/.+#{image_name}\.LJPEG/].nil?
+				$log.warn("LJPEG file DNE: in directory " + base_dir + ". Trying to fetch via FTP: " + image_name)
+				# We've found it, so get the file.
+				line.chomp!
+				local_path = get_file_via_ftp(line)
+				return local_path
+			end
+			end
+		end
+	end
+	
+	# If we get here we didn't find where the file is on the server.
+	$log.fatal("File does not exist: " + image_name)
+	exit(-1)
 end
 
 # Given the path to the dir containing the jpeg program, the path to a
@@ -448,9 +457,12 @@ def main
 	elsif options.file != nil
 		# Get the image dimensions and digitizer name string for the
 		# specified image.
-		image_info = get_image_info(options.data, '', options.file)
+		image_info = get_image_info(options.data, options.file)
 		# Get the LJPEG file, returning the path to the local file.
-		ljpeg_file = get_ljpeg(options.file)
+		ljpeg_file = get_ljpeg(options.data, options.file)
+		 # Convert the LJPEG file to PNM and delete the original LJPEG.
+		pnm_file = ljpeg_to_pnm(ljpeg_file, image_info)
+		#File.delete(ljpeg_file)
 	elsif options.list != nil
 		image_info = get_image_info(image_name)
 	else
@@ -461,9 +473,7 @@ def main
   
   exit(1)
   
-  # Convert the LJPEG file to PNM and delete the original LJPEG.
-  pnm_file = ljpeg_to_pnm(ljpeg_file, image_info)
-  File.delete(ljpeg_file)
+
 
   # Now convert the PNM file to PNG and delete the PNG file.
   target_png_file = image_name + '.png'
