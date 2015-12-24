@@ -12,7 +12,10 @@ require 'logger'
 require 'find'
 require 'parallel'
 
-$log = Logger.new(STDOUT)
+log_file = "output-ddsm-convert_" + Time.now.asctime + ".log"
+log_file.gsub! ":" , "-"
+log_file.gsub! " " , "_"
+$log = Logger.new(log_file)
 $log.level = Logger::DEBUG
 
 class Optparse
@@ -32,36 +35,46 @@ class Optparse
 	options.all = false
 	options.file = nil
 	options.nthreads = 0
-	
-    options.inplace = false
+	options.stdlog = false
 	options.save = "."
-    options.encoding = "utf8"
-    options.transfer_type = :auto
-	maxNthreads = 3
+	options.overwritePNG = true
+	maxNthreads = 8
+	
     
 
     opt_parser = OptionParser.new do |opts|
-      opts.banner = "Usage: example.rb [options]"
+		opts.banner = "Usage: example.rb [options]"
 
-      opts.separator ""
-      opts.separator "Specific options:"
-	  
-	  # Mandatory argument.
-      opts.on("-d", "--data [DATA PATH]",
-              "The path containing the /DDSM directory") do |data|
-        options.data = data
-      end
-	  
-	  # Boolean switch.
-      opts.on("-a", "--[no-]all", "Convert all files") do |a|
-        options.all = a
-      end
-	  
-	  
-	  opts.on("-s", "--save [SAVE PATH]",
-              "The path containing the results of the convertion") do |save|
-        options.save = save
-      end
+		opts.separator ""
+		opts.separator "Specific options:"
+
+		# Mandatory argument.
+		opts.on("-d", "--data [DATA PATH]",
+				"The path containing the /DDSM directory") do |data|
+			options.data = data
+		end
+
+		# Boolean switch.
+		opts.on("-a", "--[no-]all", "Convert all files") do |a|
+			options.all = a
+		end
+
+
+		opts.on("-s", "--save [SAVE PATH]",
+				"The path containing the results of the convertion") do |save|
+			options.save = save
+		end
+		
+		opts.on("-L", "--[no-]stdlog",
+				"Log to file or to STDOUT") do |stdlog|
+			$log = Logger.new(STDOUT)
+			$log.level = Logger::DEBUG
+		end
+		
+		opts.on("-o", "--[no-]overwritePNG",
+				"Overwrite PNG files with matching names") do |overwritePNG|
+			options.overwritePNG = overwritePNG
+		end
 	  
 		# Boolean switch.
 		opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
@@ -107,50 +120,6 @@ class Optparse
 			end
 		end
 
-		# Optional argument; multi-line description.
-		opts.on("-i", "--inplace [EXTENSION]",
-				"Edit ARGV files in place",
-				"  (make backup if EXTENSION supplied)") do |ext|
-			options.inplace = true
-			options.extension = ext || ''
-			options.extension.sub!(/\A\.?(?=.)/, ".")  # Ensure extension begins with dot.
-		end
-
-		# Cast 'delay' argument to a Float.
-		opts.on("--delay N", Float, "Delay N seconds before executing") do |n|
-		options.delay = n
-		end
-
-      # Cast 'time' argument to a Time object.
-      opts.on("-t", "--time [TIME]", Time, "Begin execution at given time") do |time|
-        options.time = time
-      end
-
-      # Cast to octal integer.
-      opts.on("-F", "--irs [OCTAL]", OptionParser::OctalInteger,
-              "Specify record separator (default \\0)") do |rs|
-        options.record_separator = rs
-      end
-
-      
-
-      # Keyword completion.  We are specifying a specific set of arguments (CODES
-      # and CODE_ALIASES - notice the latter is a Hash), and the user may provide
-      # the shortest unambiguous text.
-      code_list = (CODE_ALIASES.keys + CODES).join(',')
-      opts.on("--code CODE", CODES, CODE_ALIASES, "Select encoding",
-              "  (#{code_list})") do |encoding|
-        options.encoding = encoding
-      end
-
-      # Optional argument with keyword completion.
-      opts.on("--type [TYPE]", [:text, :binary, :auto],
-              "Select transfer type (text, binary, auto)") do |t|
-        options.transfer_type = t
-      end
-
-      
-
       opts.separator ""
       opts.separator "Common options:"
 
@@ -161,11 +130,6 @@ class Optparse
         exit
       end
 
-      # Another typical switch to print the version.
-      opts.on_tail("--version", "Show version") do
-        puts ::Version.join('.')
-        exit
-      end
     end
 
     opt_parser.parse!(args)
@@ -177,6 +141,11 @@ end  # class Optparse
 # Specify the name of the info-file.
 def info_file_name
   'info-file.txt'
+end
+
+# Specify the name of the all-files.
+def all_file_names
+  'all-files.txt'
 end
 
 
@@ -281,6 +250,43 @@ def get_ics_file_ftp_path(image_name)
   
   # If we get here, then we did not find a match, so we will return nil.
   return nil
+end
+
+# Given the name of a DDSM image, return the name to the remote
+# .ics file associated with the image name. If we can't find the 
+# path, then we return nil.
+def get_ics_file_ftp_path(image_name)
+  # Get the path to the .ics file for the specified image.
+  File.open(info_file_name) do |file|
+    file.each_line do |line|
+      # Does this line specify the .ics file for the specified image name?
+      if !line[/.+#{image_name}/].nil?
+        # If so, we can stop looking
+        return line
+      end
+    end
+  end
+  
+  # If we get here, then we did not find a match, so we will return nil.
+  return nil
+end
+
+# Given the name of a DDSM image, return the name to the remote
+# .ics file associated with the image name. If we can't find the 
+# path, then we return nil.
+def get_list_of_all_files()
+	list = []
+	# Geto the path to the .ics file for the specified image.
+	File.open(all_file_names) do |file|
+		file.each_line do |line|
+			# Does this line specify the .ics file for the specified image name?
+			if line =~ /(A_.*|B_.*|C_.*|D_.*)/
+				# If so, we can stop looking
+				list.push(line.chomp!)
+			end
+		end
+	end
+	return list
 end
 
 # Given a line from a .ics file, return a string that specifies the
@@ -481,6 +487,14 @@ def convert_single_file_to_png(options)
 		$log.error("File not specified")
 		return
 	end
+	png_file_test = File.join(options.data, options.file + ".png")
+	
+	if options.overwritePNG  and FileTest.exist?(png_file_test)
+		$log.warn("Skipping: Found PNG file :" + png_file_test)
+		return
+	elsif FileTest.exist?(png_file_test)
+		$log.warn("Overwriting: Found PNG file :" + png_file_test)
+	end
 	# Get the image dimensions and digitizer name string for the
 	# specified image.
 	image_info = get_image_info(options.data, options.file)
@@ -522,29 +536,34 @@ def convert_list_of_files_to_png(options)
 	end
 	
 	optArray = Array.new
-	pdf_file_paths = []
+	dirHash = Hash.new("")
+	Find.find(options.data) do |path|
+		# Find all LJPEG files in this subdirectory
+		if path =~ /.*\.LJPEG$/
+			file_path = File.dirname(path)
+			file_name = File.basename(path, ".LJPEG")
+			dirHash[:"#{file_name}"] = file_path
+		end
+	end
 	
 	$log.info("Preparing options for the list files")
 	options.list.map! do |file_name|
+		if file_name == nil or file_name == "."
+			$log.warn("Nil or Invalid file name in list : ")
+			next
+		end
 		opts = OpenStruct.new(options)
 		opts.file = file_name
+		file_path = dirHash[:"#{file_name}"]
 		
-		file_path = nil
-		Find.find(options.data) do |path|
-			if path =~ /.*#{file_name}\.LJPEG$/
-				file_path = File.dirname(path)
-				$log.debug("Found file " + file_name + " in directory " + file_path)
-			end
+		if file_path == "" 
+			$log.warn("File : "+ file_name +" not found in directory: " + options.data)
+			next
 		end
 		opts.data = file_path
 		opts.save = file_path
-		if file_path == nil
-			$log.warn("File not found : " + file_name + " Fetch via FTP")
-			opts.data = "."
-		end
 		optArray.push(opts)
 	end
-	
 	nproc = [options.nthreads.to_i,optArray.length].min
 	$log.debug("Num Processes : #{nproc}")
 	
@@ -552,35 +571,7 @@ def convert_list_of_files_to_png(options)
 	results = Parallel.map(optArray, :in_processes=>nproc, :progress => "Converting files") do |opts|
 		convert_single_file_to_png(opts)
 	end
-	exit(0)
 	
-	# options.list.each do |file|
-		# work_q.push file
-	# end
-	
-	# workers = (0...options.nthreads).map do
-	  # Thread.new(options)  do |opts|
-		# begin
-			# while file = work_q.pop(true)
-				# opts.file = file
-				# $log.info(opts)
-				# convert_single_file_to_png(opts)
-			# end
-		# rescue ThreadError
-		# end
-	  # end
-	# end; "ok"
-	# workers.map(&:join); "ok"
-	# exit(0)
-
-	# options.list.each_with_index do |val, index|
-		# puts "#{index} => #{val}"
-		# options.file = val
-		# convert_single_file_to_png(options)
-	# end
-end
-
-def get_list_of_all_files(options)
 end
 
 # The entry point of the program.
@@ -590,14 +581,13 @@ def main
 	options = Optparse.parse(ARGV)
 	$log.info("Staring program")
 	
-	if options.verbose
-		$log.info("OPTIONS:")
-		$log.info(options)
-	end
+	$log.info("OPTIONS:")
+	$log.info(options)
 	$log.info('Looking for files from base directory: ' + options.data)
   
 	if options.all == true
-		image_info = get_image_info(image_name)
+		options.list = get_list_of_all_files()
+		convert_list_of_files_to_png(options)
 	elsif options.file != nil
 		convert_single_file_to_png(options)
 	elsif options.list != nil
