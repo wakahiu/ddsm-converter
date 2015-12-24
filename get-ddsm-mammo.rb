@@ -9,7 +9,7 @@ require 'ostruct'
 require 'optparse/time'
 require 'pp'
 require 'logger'
-require 'thread'
+require 'find'
 require 'parallel'
 
 $log = Logger.new(STDOUT)
@@ -502,7 +502,7 @@ def convert_single_file_to_png(options)
 	end
 
 	# Test to see if we got something.
-	if !FileTest.exist?(png_file)
+	if !FileTest.exist?(File.join(options.save, png_file))
 		$log.fatal( 'Could not create PNG file.' + target_png_file)
 		exit(-1)
 	end
@@ -522,10 +522,26 @@ def convert_list_of_files_to_png(options)
 	end
 	
 	optArray = Array.new
+	pdf_file_paths = []
 	
+	$log.info("Preparing options for the list files")
 	options.list.map! do |file_name|
 		opts = OpenStruct.new(options)
 		opts.file = file_name
+		
+		file_path = nil
+		Find.find(options.data) do |path|
+			if path =~ /.*#{file_name}\.LJPEG$/
+				file_path = File.dirname(path)
+				$log.debug("Found file " + file_name + " in directory " + file_path)
+			end
+		end
+		opts.data = file_path
+		opts.save = file_path
+		if file_path == nil
+			$log.warn("File not found : " + file_name + " Fetch via FTP")
+			opts.data = "."
+		end
 		optArray.push(opts)
 	end
 	
@@ -533,36 +549,35 @@ def convert_list_of_files_to_png(options)
 	$log.debug("Num Processes : #{nproc}")
 	
 	# N CPUs -> work in nproc processes
-	results = Parallel.map(optArray, :in_processes=>nproc, :progress => "Doing stuff") do |opts|
+	results = Parallel.map(optArray, :in_processes=>nproc, :progress => "Converting files") do |opts|
 		convert_single_file_to_png(opts)
-		sleep 1
 	end
 	exit(0)
 	
-	options.list.each do |file|
-		work_q.push file
-	end
+	# options.list.each do |file|
+		# work_q.push file
+	# end
 	
-	workers = (0...options.nthreads).map do
-	  Thread.new(options)  do |opts|
-		begin
-			while file = work_q.pop(true)
-				opts.file = file
-				$log.info(opts)
-				convert_single_file_to_png(opts)
-			end
-		rescue ThreadError
-		end
-	  end
-	end; "ok"
-	workers.map(&:join); "ok"
-	exit(0)
+	# workers = (0...options.nthreads).map do
+	  # Thread.new(options)  do |opts|
+		# begin
+			# while file = work_q.pop(true)
+				# opts.file = file
+				# $log.info(opts)
+				# convert_single_file_to_png(opts)
+			# end
+		# rescue ThreadError
+		# end
+	  # end
+	# end; "ok"
+	# workers.map(&:join); "ok"
+	# exit(0)
 
-	options.list.each_with_index do |val, index|
-		puts "#{index} => #{val}"
-		options.file = val
-		convert_single_file_to_png(options)
-	end
+	# options.list.each_with_index do |val, index|
+		# puts "#{index} => #{val}"
+		# options.file = val
+		# convert_single_file_to_png(options)
+	# end
 end
 
 def get_list_of_all_files(options)
