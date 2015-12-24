@@ -9,6 +9,8 @@ require 'ostruct'
 require 'optparse/time'
 require 'pp'
 require 'logger'
+require 'thread'
+require 'parallel'
 
 $log = Logger.new(STDOUT)
 $log.level = Logger::DEBUG
@@ -29,11 +31,13 @@ class Optparse
 	options.verbose = false
 	options.all = false
 	options.file = nil
+	options.nthreads = 0
 	
     options.inplace = false
 	options.save = "."
     options.encoding = "utf8"
     options.transfer_type = :auto
+	maxNthreads = 3
     
 
     opt_parser = OptionParser.new do |opts|
@@ -49,41 +53,73 @@ class Optparse
       end
 	  
 	  # Boolean switch.
-      opts.on("-a", "--all [ALL]", "Convert all files") do |a|
+      opts.on("-a", "--[no-]all", "Convert all files") do |a|
         options.all = a
       end
+	  
 	  
 	  opts.on("-s", "--save [SAVE PATH]",
               "The path containing the results of the convertion") do |save|
         options.save = save
       end
 	  
-	  # Boolean switch.
-      opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
-        options.verbose = v
-      end
+		# Boolean switch.
+		opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
+			options.verbose = v
+		end
 	  
-	  opts.on("-f", "--file [FIlE NAME]",
-              "The filename to be converted into PNG",
-			  "For example: A_1141_1.LEFT_MLO",
-			  "Overrides --all") do |file|
-        options.file = file
-		options.all = false
-      end
+		opts.on("-f", "--file [FIlE NAME]",
+				"The filename to be converted into PNG",
+				"For example: A_1141_1.LEFT_MLO",
+				"Overrides --all") do |file|
+			options.file = file
+			if options.all or options.list != nil
+				$log.error('Invalid arguments: Cannot specify a file and [--list or --all]')
+			end
+			options.all = false
+		end
+		
+	  
+		# List of arguments.
+		opts.on("-l", "--list file_1,file_2,file_3", Array, "Example 'list' of arguments") do |list|
+			options.list = list
+			if options.all or options.file != nil
+				$log.error('Invalid arguments: Cannot specify a list and [--file or --all]')
+			end
+			options.nthreads = [options.list.length, maxNthreads].min
+			options.all = false
+		end
+		
+		# Number of threads (Optional).
+		opts.on("-n", "--nthreads [NUMBER OF THREADSs]",
+				"The number of threads to perform conversion.",
+				"0 threads denotes synchronous  code.",
+				"Defaults to 0 if a single file is specified",
+				"Defaults to min[8, list.length, nthreads] if list or all is specified") do |nthreads|
+			if options.file != nil 
+				options.nthreads = 0
+			else
+				if options.list == nil
+					options.nthreads = [maxNthreads, nthreads.to_i].min
+				else
+					options.nthreads = [maxNthreads, nthreads.to_i, options.list.length].min
+				end
+			end
+		end
 
-      # Optional argument; multi-line description.
-      opts.on("-i", "--inplace [EXTENSION]",
-              "Edit ARGV files in place",
-              "  (make backup if EXTENSION supplied)") do |ext|
-        options.inplace = true
-        options.extension = ext || ''
-        options.extension.sub!(/\A\.?(?=.)/, ".")  # Ensure extension begins with dot.
-      end
+		# Optional argument; multi-line description.
+		opts.on("-i", "--inplace [EXTENSION]",
+				"Edit ARGV files in place",
+				"  (make backup if EXTENSION supplied)") do |ext|
+			options.inplace = true
+			options.extension = ext || ''
+			options.extension.sub!(/\A\.?(?=.)/, ".")  # Ensure extension begins with dot.
+		end
 
-      # Cast 'delay' argument to a Float.
-      opts.on("--delay N", Float, "Delay N seconds before executing") do |n|
-        options.delay = n
-      end
+		# Cast 'delay' argument to a Float.
+		opts.on("--delay N", Float, "Delay N seconds before executing") do |n|
+		options.delay = n
+		end
 
       # Cast 'time' argument to a Time object.
       opts.on("-t", "--time [TIME]", Time, "Begin execution at given time") do |time|
@@ -96,10 +132,7 @@ class Optparse
         options.record_separator = rs
       end
 
-      # List of arguments.
-      opts.on("--list x,y,z", Array, "Example 'list' of arguments") do |list|
-        options.list = list
-      end
+      
 
       # Keyword completion.  We are specifying a specific set of arguments (CODES
       # and CODE_ALIASES - notice the latter is a Hash), and the user may provide
@@ -373,22 +406,22 @@ end
 # local file if successful. If we can't get the file, then return nil.
 def get_ljpeg(base_dir, image_name)
 
-	file_path = File.join(base_dir, image_name)
+	file_path = File.join(base_dir, image_name + ".LJPEG")
 	$log.info("Checking if LJPEG file exists: " + file_path)
-	if FileTest.exist?(file_path)
+	if FileTest.exist?( file_path )
 		return file_path
 	else
 		# Get the path to the image file on the mirror of the FTP server.
 		path = nil
 		File.open(info_file_name) do |file|
 			file.each_line do |line|
-			if !line[/.+#{image_name}\.LJPEG/].nil?
-				$log.warn("LJPEG file DNE: in directory " + base_dir + ". Trying to fetch via FTP: " + image_name)
-				# We've found it, so get the file.
-				line.chomp!
-				local_path = get_file_via_ftp(line)
-				return local_path
-			end
+				if !line[/.+#{image_name}\.LJPEG/].nil?
+					$log.warn("LJPEG file DNE: in directory " + base_dir + ". Trying to fetch via FTP: " + image_name)
+					# We've found it, so get the file.
+					line.chomp!
+					local_path = get_file_via_ftp(line)
+					return local_path
+				end
 			end
 		end
 	end
@@ -404,12 +437,14 @@ end
 def ljpeg_to_pnm(ljpeg_file, dims_and_digitizer)
   # First convert it to raw format.
   command = "./jpeg.exe -d -s #{ljpeg_file}"
+  $log.debug("Converting file to PNM: " + ljpeg_file)
   `#{command}` # Run it.
   raw_file = ljpeg_file + '.1' # The jpeg program adds a .1 suffix.
   
   # See if the .1 file was created.
   if !FileTest.exist?(raw_file)
-    raise 'Could not convert from LJPEG to raw.'
+    $log.fatal('Could not convert from LJPEG to raw.')
+	exit(-1)
   end
 
   # Now convert the raw file to PNM and delete the raw file.
@@ -417,7 +452,8 @@ def ljpeg_to_pnm(ljpeg_file, dims_and_digitizer)
   pnm_file = `#{command}`
   File.delete(raw_file)
   if $? != 0
-    raise 'Could not convert from raw to PNM.'
+    $log.fatal('Could not convert from raw to PNM. ' + raw_file)
+	exit(-1)
   end
 
   # Return the path to the PNM file.
@@ -427,16 +463,110 @@ end
 # Convert a PNM file to a PNG file. pnm_file is the path to the pnm file
 # and target_png_file is the name of the PNG file that we want created.
 def pnm_to_png(pnm_file, target_png_file)
-  command = "convert -depth 16 #{pnm_file} #{target_png_file}"
-  `#{command}`
 
-  if !FileTest.exist?(target_png_file)
-    raise 'Could not convert from PNM to PNG.'
-  end
+	$log.info("Converting file to PNG: " + pnm_file)
+	command = "convert -depth 16 #{pnm_file} #{target_png_file}"
+	`#{command}`
 
-  return target_png_file
+	if !FileTest.exist?(target_png_file)
+		$log.error('Could not convert from PNM to PNG. ' + target_png_file)
+	end
+
+	return target_png_file
 end
 
+# Converts a single file defined in options.file to png
+def convert_single_file_to_png(options)
+	if options.file == nil
+		$log.error("File not specified")
+		return
+	end
+	# Get the image dimensions and digitizer name string for the
+	# specified image.
+	image_info = get_image_info(options.data, options.file)
+	# Get the LJPEG file, returning the path to the local file.
+	ljpeg_file = get_ljpeg(options.data, options.file)
+	# Convert the LJPEG file to PNM
+	pnm_file = ljpeg_to_pnm(ljpeg_file, image_info)
+	# delete the original LJPEG.
+	#File.delete(ljpeg_file)
+	# Now convert the PNM file to PNG and delete the PNG file.
+	target_png_file = options.file + '.png'
+	png_file = pnm_to_png(pnm_file, target_png_file)
+	File.delete(pnm_file)
+	save_path = File.join( options.save, target_png_file)
+	$log.info("Saving file to :" + save_path)
+	unless options.save == "."
+		command = "mv #{target_png_file} #{save_path}"
+		`#{command}`
+	end
+
+	# Test to see if we got something.
+	if !FileTest.exist?(png_file)
+		$log.fatal( 'Could not create PNG file.' + target_png_file)
+		exit(-1)
+	end
+	 # Display the path to the file.
+	$log.info("Finished converting file: " + File.expand_path(png_file))
+end
+
+def dummy_function(options)
+	$log.info(options.file)
+end
+
+def convert_list_of_files_to_png(options)
+	work_q = Queue.new
+	if options.list == nil
+		$log.error("File list not specified")
+		return
+	end
+	
+	optArray = Array.new
+	
+	options.list.map! do |file_name|
+		opts = OpenStruct.new(options)
+		opts.file = file_name
+		optArray.push(opts)
+	end
+	
+	nproc = [options.nthreads.to_i,optArray.length].min
+	$log.debug("Num Processes : #{nproc}")
+	
+	# N CPUs -> work in nproc processes
+	results = Parallel.map(optArray, :in_processes=>nproc, :progress => "Doing stuff") do |opts|
+		convert_single_file_to_png(opts)
+		sleep 1
+	end
+	exit(0)
+	
+	options.list.each do |file|
+		work_q.push file
+	end
+	
+	workers = (0...options.nthreads).map do
+	  Thread.new(options)  do |opts|
+		begin
+			while file = work_q.pop(true)
+				opts.file = file
+				$log.info(opts)
+				convert_single_file_to_png(opts)
+			end
+		rescue ThreadError
+		end
+	  end
+	end; "ok"
+	workers.map(&:join); "ok"
+	exit(0)
+
+	options.list.each_with_index do |val, index|
+		puts "#{index} => #{val}"
+		options.file = val
+		convert_single_file_to_png(options)
+	end
+end
+
+def get_list_of_all_files(options)
+end
 
 # The entry point of the program.
 def main
@@ -449,47 +579,19 @@ def main
 		$log.info("OPTIONS:")
 		$log.info(options)
 	end
-	
-	$log.info('Looking for files files from base directory: ' + options.data)
+	$log.info('Looking for files from base directory: ' + options.data)
   
 	if options.all == true
 		image_info = get_image_info(image_name)
 	elsif options.file != nil
-		# Get the image dimensions and digitizer name string for the
-		# specified image.
-		image_info = get_image_info(options.data, options.file)
-		# Get the LJPEG file, returning the path to the local file.
-		ljpeg_file = get_ljpeg(options.data, options.file)
-		 # Convert the LJPEG file to PNM and delete the original LJPEG.
-		pnm_file = ljpeg_to_pnm(ljpeg_file, image_info)
-		#File.delete(ljpeg_file)
+		convert_single_file_to_png(options)
 	elsif options.list != nil
-		image_info = get_image_info(image_name)
+		convert_list_of_files_to_png(options)
 	else
 		exit(-1)
 	end
-
-  
-  
-  exit(1)
   
 
-
-  # Now convert the PNM file to PNG and delete the PNG file.
-  target_png_file = image_name + '.png'
-  png_file = pnm_to_png(pnm_file, target_png_file)
-  File.delete(pnm_file)
-
-  # Test to see if we got something.
-  if !FileTest.exist?(png_file)
-    raise 'Could not create PNG file.'
-    exit(-1)
-  end
-
-  # Display the path to the file.
-  puts File.expand_path(png_file)
-
-  exit(0)
 end
 
 # The help message
