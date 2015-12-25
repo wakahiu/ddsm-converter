@@ -271,9 +271,7 @@ def get_ics_file_ftp_path(image_name)
   return nil
 end
 
-# Given the name of a DDSM image, return the name to the remote
-# .ics file associated with the image name. If we can't find the 
-# path, then we return nil.
+# Returns a list of all the files in the DDSM dataset
 def get_list_of_all_files()
 	list = []
 	# Geto the path to the .ics file for the specified image.
